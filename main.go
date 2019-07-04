@@ -4,27 +4,19 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
-	"strconv"
 	"time"
-
-	"github.com/donyori/gorecover"
 )
-
-type Result struct {
-	A    *big.Int
-	Cost *CostInfo
-}
 
 const (
 	DefaultTimeout time.Duration = time.Minute
-	DefaultVerbose int           = 1
+	DefaultVerbose int           = 0
 )
 
 func main() {
 	var timeout time.Duration
 	var verbose int
 	timeoutUsage := "Time limit, only valid when it is positive"
-	verboseUsage := "> 0 to show warning message"
+	verboseUsage := "> 0 to show debug message"
 	flag.DurationVar(&timeout, "timeout", DefaultTimeout, timeoutUsage)
 	flag.DurationVar(&timeout, "t", DefaultTimeout, timeoutUsage+" (shorthand)")
 	flag.IntVar(&verbose, "verbose", DefaultVerbose, verboseUsage)
@@ -35,9 +27,9 @@ func main() {
 		fmt.Println("You should give exactly two arguments: m and n.")
 		return
 	}
-	m, err := strconv.Atoi(args[0])
-	if err != nil {
-		fmt.Println("Argument m cannot be parsed as an integer or overflows. Error message:", err)
+	m, ok := new(big.Int).SetString(args[0], 0)
+	if !ok {
+		fmt.Println("Argument m cannot be parsed as an integer.")
 		return
 	}
 	n, ok := new(big.Int).SetString(args[1], 0)
@@ -45,34 +37,18 @@ func main() {
 		fmt.Println("Argument n cannot be parsed as an integer.")
 		return
 	}
-	var timeoutC <-chan time.Time
-	resultC := make(chan *Result)
-	if timeout > 0 {
-		timeoutC = time.After(timeout)
-	}
-	go func() {
-		var r *Result
-		err := gorecover.Recover(func() {
-			a, cost := A(m, n, verbose)
-			r = &Result{
-				A:    a,
-				Cost: cost,
-			}
-		})
-		if err != nil {
-			fmt.Println("Error:", err)
-			r = nil
+	a, cost := A(m, n, timeout, verbose, func(err error, stackTrace string) {
+		fmt.Println("Error:", err)
+		if stackTrace != "" {
+			fmt.Println("Stack trace:")
+			fmt.Println(stackTrace)
 		}
-		resultC <- r
-	}()
-	select {
-	case r := <-resultC:
-		if r != nil {
-			fmt.Printf("A(%d, %v) = %v\n", m, n, r.A)
-		}
-		fmt.Printf("Elapsed %v. Max stack size: %d. Number of calculated Ackermann–Péter function: %d.\n",
-			r.Cost.Time, r.Cost.MaxStackSize, r.Cost.NumCalcA)
-	case <-timeoutC:
+	})
+	if a != nil {
+		fmt.Printf("A(%v, %v) = %v\n", m, n, a)
+	} else {
 		fmt.Printf("Timeout. (time limit: %v)\n", timeout)
 	}
+	fmt.Printf("Elapsed %v. Max stack size: %v. Number of saved Ackermann–Péter function: %v.\n",
+		cost.Time, cost.MaxStackSize, cost.NumSaved)
 }

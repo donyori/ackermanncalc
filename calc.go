@@ -2,111 +2,181 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"math/big"
 	"time"
-)
 
-type MNPair struct {
-	M int
-	N string
-}
+	"github.com/donyori/gorecover"
+)
 
 type CostInfo struct {
 	Time         time.Duration
-	MaxStackSize int
-	NumCalcA     int
+	MaxStackSize *big.Int
+	NumSaved     *big.Int
 }
 
-const StackSizeWarnMinLog float64 = 5.
+type stackElement struct {
+	target         *BigIntPair
+	numArrowCopies *big.Int
+}
 
-var One *big.Int = big.NewInt(1)
-
-func A(m int, n *big.Int, verbose int) (a *big.Int, cost *CostInfo) {
-	if m < 0 {
-		panic(fmt.Errorf("m (%d) is negative", m))
+func A(m, n *big.Int, timeout time.Duration, verbose int,
+	panicHandler func(err error, stackTrace string)) (
+	a *big.Int, cost *CostInfo) {
+	if m.Sign() < 0 {
+		panic(fmt.Errorf("m (%v) is negative", m))
 	}
 	if n.Sign() < 0 {
 		panic(fmt.Errorf("n (%v) is negative", n))
 	}
 	startTime := time.Now()
-	cost = new(CostInfo)
-	stack := []MNPair{MNPair{M: m, N: string(n.Bytes())}}
-	knownA := make(map[MNPair]*big.Int)
-	var top, tmpPair MNPair
-	var topN, b *big.Int
-	for len(stack) > 0 {
-		top = stack[len(stack)-1]
-		topN = new(big.Int).SetBytes([]byte(top.N))
-		if top.M > 0 {
-			if topN.Sign() > 0 {
-				tmpPair = MNPair{
-					M: top.M,
-					N: string(new(big.Int).Sub(topN, One).Bytes()),
+	var timeoutC <-chan time.Time
+	if timeout > 0 {
+		timeoutC = time.After(timeout)
+	}
+	doneC := make(chan struct{})
+	cost = &CostInfo{MaxStackSize: big.NewInt(0)}
+	savedMap := NewBigMap(0)
+	f := func() {
+		defer close(doneC)
+		stack := NewBigStack()
+		stack.Push(&stackElement{
+			target: NewBigIntPair(Sub(m, Two), Add(n, Three)),
+		})
+		var v interface{}
+		var top *stackElement
+		var sLen, x, b, r *big.Int
+		didPush := false
+		for !stack.IsEmpty() {
+			v, _ = stack.Top()
+			top = v.(*stackElement)
+			if didPush {
+				didPush = false
+				sLen = stack.Len()
+				if cost.MaxStackSize.Cmp(sLen) < 0 {
+					cost.MaxStackSize.Set(sLen)
 				}
-				b = knownA[tmpPair]
-				if b == nil {
-					stack = append(stack, tmpPair)
-					if len(stack) > cost.MaxStackSize {
-						cost.MaxStackSize = len(stack)
-						if verbose > 0 {
-							log := math.Log10(float64(cost.MaxStackSize))
-							if log == math.Round(log) &&
-								log >= StackSizeWarnMinLog {
-								fmt.Println("WARNING: stack size up to",
-									cost.MaxStackSize)
-							}
-						}
-					}
+				if verbose > 0 {
+					fmt.Printf("Pushed A(%v, %v).\n",
+						Add(top.target.X(), Two),
+						Sub(top.target.Y(), Three))
+				}
+			}
+			if top.numArrowCopies != nil {
+				// r = 2 ↑(n_top_target-1) b0
+				if top.numArrowCopies.Cmp(One) > 0 {
+					// r_top_target = [2 ↑(n_top_target-1)](top.numArrowCopies-1 copies) r
+					// So decrease top.numArrowCopies and push 2 ↑(n_top_target-1) r.
+					top.numArrowCopies.Sub(top.numArrowCopies, One)
+					stack.Push(&stackElement{
+						target: NewBigIntPair(Sub(top.target.X(), One), r),
+					})
+					didPush = true
 				} else {
-					tmpPair = MNPair{M: top.M - 1, N: string(b.Bytes())}
-					b = knownA[tmpPair]
-					if b == nil {
-						stack = append(stack, tmpPair)
-						if len(stack) > cost.MaxStackSize {
-							cost.MaxStackSize = len(stack)
-							if verbose > 0 {
-								log := math.Log10(float64(cost.MaxStackSize))
-								if log == math.Round(log) &&
-									log >= StackSizeWarnMinLog {
-									fmt.Println("WARNING: stack size up to",
-										cost.MaxStackSize)
-								}
-							}
-						}
-					} else {
-						knownA[top] = b
-						stack = stack[:len(stack)-1]
+					// r is just the result of the top target.
+					// Save the result and pop.
+					saveKnuthsUpArrowNotationValue(savedMap, top.target, r)
+					stack.Pop()
+					if verbose > 0 {
+						fmt.Printf("Saved A(%v, %v).\n",
+							Add(top.target.X(), Two),
+							Sub(top.target.Y(), Three))
+						fmt.Println("Popped.")
 					}
 				}
 			} else {
-				tmpPair = MNPair{M: top.M - 1, N: string(One.Bytes())}
-				b = knownA[tmpPair]
-				if b == nil {
-					stack = append(stack, tmpPair)
-					if len(stack) > cost.MaxStackSize {
-						cost.MaxStackSize = len(stack)
-						if verbose > 0 {
-							log := math.Log10(float64(cost.MaxStackSize))
-							if log == math.Round(log) &&
-								log >= StackSizeWarnMinLog {
-								fmt.Println("WARNING: stack size up to",
-									cost.MaxStackSize)
-							}
-						}
-					}
+				x = simpleKnuthsUpArrowNotationValue(top.target)
+				if x == nil {
+					b, x = knownKnuthsUpArrowNotationValue(
+						savedMap, top.target.XInd())
+					top.numArrowCopies = top.target.YInd().ToBigInt() // b of the target, must > b.
+					top.numArrowCopies.Sub(top.numArrowCopies, b)     // Total (bt - b) arrows.
+					stack.Push(&stackElement{
+						target: NewBigIntPair(Sub(top.target.X(), One), x),
+					})
+					didPush = true
 				} else {
-					knownA[top] = b
-					stack = stack[:len(stack)-1]
+					r = x
+					stack.Pop()
+					if verbose > 0 {
+						fmt.Println("Popped.")
+					}
 				}
 			}
-		} else {
-			knownA[top] = new(big.Int).Add(topN, One)
-			stack = stack[:len(stack)-1]
+		}
+		if r != nil {
+			a = Sub(r, Three)
 		}
 	}
+	go func() {
+		if panicHandler != nil {
+			err, st := gorecover.RecoverWithStackTrace(f)
+			if err != nil {
+				panicHandler(err, st)
+			}
+		} else {
+			f()
+		}
+	}()
+	select {
+	case <-doneC:
+	case <-timeoutC:
+	}
 	cost.Time = time.Since(startTime)
-	cost.NumCalcA = len(knownA)
-	a = knownA[MNPair{M: m, N: string(n.Bytes())}]
+	cost.NumSaved = savedMap.Len()
 	return
+}
+
+func Add(x, y *big.Int) *big.Int {
+	return new(big.Int).Add(x, y)
+}
+
+func Sub(x, y *big.Int) *big.Int {
+	return new(big.Int).Sub(x, y)
+}
+
+func Mul(x, y *big.Int) *big.Int {
+	return new(big.Int).Mul(x, y)
+}
+
+func Exp(a, x *big.Int) *big.Int {
+	return new(big.Int).Exp(a, x, nil)
+}
+
+func simpleKnuthsUpArrowNotationValue(nAndB *BigIntPair) (x *big.Int) {
+	n := nAndB.X()
+	b := nAndB.Y()
+	cmp := n.Cmp(One)
+	if cmp > 0 {
+		switch b {
+		case Two:
+			x = Four
+		case One:
+			x = Two
+		case Zero:
+			x = One
+		}
+	} else if cmp == 0 {
+		x = Exp(Two, b)
+	} else if n == Zero {
+		x = Mul(Two, b)
+	} else if n == NegOne {
+		x = Add(Two, b)
+	} else { // n == -2
+		x = Add(b, One)
+	}
+	return
+}
+
+func knownKnuthsUpArrowNotationValue(m *BigMap, nInd BigIntIndicator) (
+	b, x *big.Int) {
+	v, ok := m.Load(string(nInd))
+	if !ok {
+		return Two, Four
+	}
+	bx := v.(*BigIntPair)
+	return bx.X(), bx.Y()
+}
+
+func saveKnuthsUpArrowNotationValue(m *BigMap, nAndB *BigIntPair, x *big.Int) {
+	m.Store(string(nAndB.XInd()), NewBigIntPair(nAndB.YInd(), x))
 }
